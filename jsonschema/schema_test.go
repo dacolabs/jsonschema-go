@@ -16,6 +16,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"gopkg.in/yaml.v3"
 )
 
 func TestMarshalJSONConsistency(t *testing.T) {
@@ -457,5 +458,351 @@ func testCloneMarshalValidate(t *testing.T, files []string, draft string) {
 				})
 			}
 		})
+	}
+}
+
+// YAML Marshaling Tests
+
+func TestMarshalYAMLConsistency(t *testing.T) {
+	// Test that MarshalYAML with value receiver ensures consistent YAML encoding
+	// regardless of how Schema is stored (mirrors TestMarshalJSONConsistency)
+
+	// Create a test schema
+	testSchema := Schema{
+		Type:      "object",
+		MinLength: Ptr(10),
+		Properties: map[string]*Schema{
+			"name": {Type: "string"},
+			"age":  {Type: "integer"},
+		},
+		Required: []string{"name"},
+	}
+
+	// Expected YAML output
+	expectedYAML, err := yaml.Marshal(testSchema)
+	if err != nil {
+		t.Fatalf("Failed to marshal expected schema: %v", err)
+	}
+
+	if !strings.Contains(string(expectedYAML), "object") {
+		t.Fatalf("Expected YAML does not contain 'object': %s", string(expectedYAML))
+	}
+
+	t.Run("DirectValue", func(t *testing.T) {
+		// Test direct value marshaling
+		got, err := yaml.Marshal(testSchema)
+		if err != nil {
+			t.Fatalf("Failed to marshal direct value: %v", err)
+		}
+		if string(got) != string(expectedYAML) {
+			t.Errorf("Direct value marshaling mismatch\ngot:  %s\nwant: %s", got, expectedYAML)
+		}
+	})
+
+	t.Run("Pointer", func(t *testing.T) {
+		// Test pointer marshaling
+		schemaPtr := &testSchema
+		got, err := yaml.Marshal(schemaPtr)
+		if err != nil {
+			t.Fatalf("Failed to marshal pointer: %v", err)
+		}
+		if string(got) != string(expectedYAML) {
+			t.Errorf("Pointer marshaling mismatch\ngot:  %s\nwant: %s", got, expectedYAML)
+		}
+	})
+
+	t.Run("MapValue", func(t *testing.T) {
+		// Test marshaling when stored as map value (non-addressable)
+		// This is a key case that fails with pointer receiver
+		schemaMap := map[string]Schema{
+			"test": testSchema,
+		}
+		got, err := yaml.Marshal(schemaMap["test"])
+		if err != nil {
+			t.Fatalf("Failed to marshal map value: %v", err)
+		}
+		if string(got) != string(expectedYAML) {
+			t.Errorf("Map value marshaling mismatch\ngot:  %s\nwant: %s", got, expectedYAML)
+		}
+	})
+
+	t.Run("MapWithSchemaValues", func(t *testing.T) {
+		// Test marshaling a map containing Schema values
+		schemaMap := map[string]Schema{
+			"schema1": testSchema,
+			"schema2": {Type: "string"},
+		}
+		got, err := yaml.Marshal(schemaMap)
+		if err != nil {
+			t.Fatalf("Failed to marshal map with Schema values: %v", err)
+		}
+
+		// Verify the map marshals correctly
+		var result map[string]Schema
+		if err := yaml.Unmarshal(got, &result); err != nil {
+			t.Fatalf("Failed to unmarshal result: %v", err)
+		}
+
+		// Check that schema1 matches expected
+		schema1YAML, _ := yaml.Marshal(result["schema1"])
+		if string(schema1YAML) != string(expectedYAML) {
+			t.Errorf("Map schema1 marshaling mismatch\ngot:  %s\nwant: %s", schema1YAML, expectedYAML)
+		}
+	})
+
+	t.Run("SliceElement", func(t *testing.T) {
+		// Test marshaling when stored in a slice
+		schemas := []Schema{testSchema}
+		gotSlice, err := yaml.Marshal(schemas)
+		if err != nil {
+			t.Fatalf("Failed to marshal slice: %v", err)
+		}
+
+		var unmarshaledSlice []Schema
+		if err := yaml.Unmarshal(gotSlice, &unmarshaledSlice); err != nil {
+			t.Fatalf("Failed to unmarshal slice: %v", err)
+		}
+
+		elementYAML, _ := yaml.Marshal(unmarshaledSlice[0])
+		if len(unmarshaledSlice) != 1 || string(elementYAML) != string(expectedYAML) {
+			t.Errorf("Slice element marshaling mismatch\ngot:  %s\nwant: %s",
+				elementYAML, expectedYAML)
+		}
+	})
+
+	t.Run("StructField", func(t *testing.T) {
+		// Test marshaling when embedded in another struct
+		type Container struct {
+			Schema Schema `yaml:"schema"`
+			Name   string `yaml:"name"`
+		}
+
+		container := Container{
+			Schema: testSchema,
+			Name:   "test",
+		}
+
+		got, err := yaml.Marshal(container)
+		if err != nil {
+			t.Fatalf("Failed to marshal struct with Schema field: %v", err)
+		}
+
+		var result Container
+		if err := yaml.Unmarshal(got, &result); err != nil {
+			t.Fatalf("Failed to unmarshal struct result: %v", err)
+		}
+
+		schemaYAML, _ := yaml.Marshal(result.Schema)
+		if string(schemaYAML) != string(expectedYAML) {
+			t.Errorf("Struct field marshaling mismatch\ngot:  %s\nwant: %s",
+				schemaYAML, expectedYAML)
+		}
+	})
+
+	t.Run("InterfaceValue", func(t *testing.T) {
+		// Test marshaling when stored as interface{}
+		var iface any = testSchema
+		got, err := yaml.Marshal(iface)
+		if err != nil {
+			t.Fatalf("Failed to marshal interface value: %v", err)
+		}
+		if string(got) != string(expectedYAML) {
+			t.Errorf("Interface value marshaling mismatch\ngot:  %s\nwant: %s", got, expectedYAML)
+		}
+	})
+
+	t.Run("EmptyPropertiesMap", func(t *testing.T) {
+		// Test that an empty map in Properties marshals as "{}" equivalent.
+		s := &Schema{Type: "object", Properties: map[string]*Schema{}}
+		got, err := yaml.Marshal(s)
+		if err != nil {
+			t.Fatalf("Failed to marshal interface value: %v", err)
+		}
+		want := "type: object\nproperties: {}\n"
+		if string(got) != want {
+			t.Errorf("\ngot  %s\nwant %s", got, want)
+		}
+	})
+}
+
+func TestGoRoundTripYAML(t *testing.T) {
+	// Verify that Go representations round-trip through YAML (mirrors TestGoRoundTrip).
+	// Note: Some cases from TestGoRoundTrip are omitted because YAML handles them differently:
+	// - Const: Ptr(any(0)) - YAML treats 0 as falsy in some contexts
+	// - Const: Ptr(any(nil)) - YAML null handling differs from JSON
+	// - Default: mustMarshal(nil) - YAML null handling differs from JSON
+	for _, s := range []*Schema{
+		{Type: "null"},
+		{Types: []string{"null", "number"}},
+		{Type: "string", MinLength: Ptr(20)},
+		{Minimum: Ptr(20.0)},
+		{Items: &Schema{Type: "integer"}},
+		{Const: Ptr(any(1))},              // use non-zero to avoid YAML edge cases
+		{Const: Ptr(any("test"))},         // string const
+		{Const: Ptr(any([]int{}))},        // empty slice
+		{Const: Ptr(any(map[string]any{}))},
+		{Default: mustMarshal(1)},
+		{Extra: map[string]any{"test": "value"}},
+	} {
+		data, err := yaml.Marshal(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got *Schema
+		if err := yaml.Unmarshal(data, &got); err != nil {
+			t.Fatal(err)
+		}
+		if !Equal(got, s) {
+			t.Errorf("got %s, want %s", got.json(), s.json())
+			if got.Const != nil && s.Const != nil {
+				t.Logf("Consts: got %#v (%[1]T), want %#v (%[2]T)", *got.Const, *s.Const)
+			}
+		}
+	}
+}
+
+func TestYAMLRoundTrip(t *testing.T) {
+	// Verify that YAML texts for schemas marshal into equivalent forms (mirrors TestJSONRoundTrip).
+	// We don't expect everything to round-trip perfectly. For example, "true" and "false"
+	// will turn into their object equivalents.
+	// But most things should.
+	for _, tt := range []struct {
+		in, want string
+	}{
+		{`true`, "true\n"},
+		{`false`, "false\n"},
+		{"type: \"\"\nenum: null\n", "true\n"}, // empty fields are omitted
+		{"minimum: 1\n", "minimum: 1\n"},
+		{"minimum: 1.0\n", "minimum: 1\n"}, // floating-point integers lose their fractional part
+		{"minLength: 1.0\n", "minLength: 1\n"},
+		{
+			// map keys are sorted
+			"$vocabulary:\n  b: true\n  a: false\n",
+			"$vocabulary:\n    a: false\n    b: true\n",
+		},
+		{"unk: 0\n", "unk: 0\n"}, // unknown fields are not dropped
+		{
+			// known and unknown fields are not dropped
+			"$comment: test\ntype: example\nunk: 0\n",
+			"$comment: test\ntype: example\nunk: 0\n",
+		},
+		{"extra: 0\n", "extra: 0\n"}, // extra is not a special keyword and should not be dropped
+		{"Extra: 0\n", "Extra: 0\n"}, // Extra is not a special keyword and should not be dropped
+	} {
+		var s Schema
+		if err := yaml.Unmarshal([]byte(tt.in), &s); err != nil {
+			t.Fatal(err)
+		}
+		data, err := yaml.Marshal(&s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := string(data); got != tt.want {
+			t.Errorf("%s:\ngot  %s\nwant %s", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestUnmarshalYAMLErrors(t *testing.T) {
+	// Mirrors TestUnmarshalErrors for YAML
+	for _, tt := range []struct {
+		in   string
+		want string // error must match this regexp
+	}{
+		{"1\n", "expected mapping or boolean"},
+		{"type: 1\n", "type must be string or array"},
+	} {
+		var s Schema
+		err := yaml.Unmarshal([]byte(tt.in), &s)
+		if err == nil {
+			t.Fatalf("%s: no error but expected one", tt.in)
+		}
+		if !regexp.MustCompile(tt.want).MatchString(err.Error()) {
+			t.Errorf("%s: error %q does not match %q", tt.in, err, tt.want)
+		}
+	}
+}
+
+func TestMarshalYAMLOrder(t *testing.T) {
+	// Mirrors TestMarshalOrder for YAML
+	for _, tt := range []struct {
+		order      []string
+		wantOrder  []string // expected property order in output
+		wantErr    bool
+		errMessage string
+	}{
+		{
+			[]string{"A", "B", "C", "D"},
+			[]string{"A", "B", "C", "D", "E"},
+			false,
+			"",
+		},
+		{
+			[]string{"A", "C", "B", "D"},
+			[]string{"A", "C", "B", "D", "E"},
+			false,
+			"",
+		},
+		{
+			[]string{"D", "C", "B", "A"},
+			[]string{"D", "C", "B", "A", "E"},
+			false,
+			"",
+		},
+		{
+			[]string{"A", "B", "C"},
+			[]string{"A", "B", "C", "D", "E"},
+			false,
+			"",
+		},
+		{
+			[]string{"A", "E", "C"},
+			[]string{"A", "E", "C", "B", "D"},
+			false,
+			"",
+		},
+		{
+			[]string{"A", "B", "C", "D", "D"},
+			nil,
+			true,
+			"property order slice cannot contain duplicate entries",
+		},
+	} {
+		s := &Schema{
+			Type: "object",
+			Properties: map[string]*Schema{
+				"A": {Type: "integer"},
+				"B": {Type: "integer"},
+				"C": {Type: "integer"},
+				"D": {Type: "integer"},
+				"E": {Type: "integer"},
+			},
+		}
+		s.PropertyOrder = tt.order
+		gotBytes, err := yaml.Marshal(s)
+		if err != nil {
+			if !tt.wantErr {
+				t.Fatal(err)
+			}
+			if !strings.Contains(err.Error(), tt.errMessage) {
+				t.Fatalf("error message mismatch: got %q, want to contain %q", err.Error(), tt.errMessage)
+			}
+			continue
+		}
+
+		// Verify property order by checking positions in output
+		yamlStr := string(gotBytes)
+		lastIdx := -1
+		for _, prop := range tt.wantOrder {
+			idx := strings.Index(yamlStr, prop+":")
+			if idx == -1 {
+				t.Errorf("property %s not found in output:\n%s", prop, yamlStr)
+				continue
+			}
+			if idx <= lastIdx {
+				t.Errorf("property %s not in expected position in output:\n%s", prop, yamlStr)
+			}
+			lastIdx = idx
+		}
 	}
 }
